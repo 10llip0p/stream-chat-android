@@ -17,6 +17,8 @@
 package io.getstream.chat.android.client.attachment
 
 import android.content.Context
+import androidx.lifecycle.asFlow
+import androidx.work.WorkManager
 import io.getstream.chat.android.client.attachment.worker.UploadAttachmentsAndroidWorker
 import io.getstream.chat.android.client.extensions.internal.hasPendingAttachments
 import io.getstream.chat.android.client.persistance.repository.RepositoryFacade
@@ -29,7 +31,10 @@ import io.getstream.result.Error
 import io.getstream.result.Result
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNot
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -158,6 +163,9 @@ internal class AttachmentsSender(
             }
             )
         enqueueAttachmentUpload(newMessage, channelType, channelId)
+        uploadIds[newMessage.id]?.let { messageUuid ->
+            WorkManager.getInstance(context).getWorkInfoByIdLiveData(messageUuid).asFlow().first { it.state.isFinished }
+        }
         jobsMap[newMessage.id]?.join()
         return if (allAttachmentsUploaded) {
             logger.d { "[waitForAttachmentsToBeSent] All attachments for message ${newMessage.id} uploaded" }
