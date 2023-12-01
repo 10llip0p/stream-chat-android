@@ -17,6 +17,9 @@
 package io.getstream.chat.android.client.attachment
 
 import android.content.Context
+import androidx.lifecycle.asFlow
+import androidx.work.WorkManager
+import io.getstream.chat.android.client.ChatClient
 import io.getstream.chat.android.client.attachment.worker.UploadAttachmentsAndroidWorker
 import io.getstream.chat.android.client.extensions.internal.hasPendingAttachments
 import io.getstream.chat.android.client.persistance.repository.RepositoryFacade
@@ -29,8 +32,7 @@ import io.getstream.result.Error
 import io.getstream.result.Result
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.filterNot
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 import java.util.UUID
 
 /**
@@ -132,33 +134,32 @@ internal class AttachmentsSender(
         channelId: String,
         repositoryFacade: RepositoryFacade,
     ): Result<Message> {
-        jobsMap[newMessage.id]?.cancel()
-        var allAttachmentsUploaded = false
         var messageToBeSent = newMessage
-
-        jobsMap = jobsMap + (
-            newMessage.id to scope.launch {
-                repositoryFacade.observeAttachmentsForMessage(newMessage.id)
-                    .filterNot(Collection<Attachment>::isEmpty)
-                    .collect { attachments ->
-                        when {
-                            attachments.all { it.uploadState == Attachment.UploadState.Success } -> {
-                                messageToBeSent = repositoryFacade.selectMessage(newMessage.id) ?: newMessage.copy(
-                                    attachments = attachments.toMutableList(),
-                                )
-                                allAttachmentsUploaded = true
-                                jobsMap[newMessage.id]?.cancel()
-                            }
-                            attachments.any { it.uploadState is Attachment.UploadState.Failed } -> {
-                                jobsMap[newMessage.id]?.cancel()
-                            }
-                            else -> Unit
-                        }
-                    }
-            }
-            )
         enqueueAttachmentUpload(newMessage, channelType, channelId)
-        jobsMap[newMessage.id]?.join()
+
+        uploadIds[newMessage.id]?.let { messageUuid ->
+            WorkManager.getInstance(context).getWorkInfoByIdLiveData(messageUuid).asFlow().first { it.state.isFinished }
+        }
+
+        val allAttachmentsUploaded = ChatClient.instance()
+            .logicRegistry
+            ?.channelStateLogic(channelType, channelId)
+            ?.listenForChannelState()
+            ?.getMessageById(newMessage.id)
+            ?.attachments
+            ?.let { attachments ->
+                when {
+                    attachments.all { it.uploadState == Attachment.UploadState.Success } -> {
+                        logger.d { "[waitForAttachmentsToBeSent] all upload states are success" }
+                        messageToBeSent = newMessage.copy(
+                            attachments = attachments.map { it.copy(upload = null) },
+                        )
+                        true
+                    }
+                    else -> false
+                }
+            } ?: false
+
         return if (allAttachmentsUploaded) {
             logger.d { "[waitForAttachmentsToBeSent] All attachments for message ${newMessage.id} uploaded" }
             Result.Success(messageToBeSent.copy(type = Message.TYPE_REGULAR))
